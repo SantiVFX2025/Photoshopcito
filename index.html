@@ -1,0 +1,251 @@
+<!doctype html>
+
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Photoshopcito Offline (PWA)</title>
+  <meta name="theme-color" content="#0b0d12" />
+  <link id="dynamic-manifest" rel="manifest" href="#">
+  <style>
+    :root{--bg:#0b0d12;--card:#141821;--muted:#9aa3af;--accent:#4f46e5;--ok:#10b981;--warn:#f59e0b;--err:#ef4444}
+    body{margin:0;background:var(--bg);color:#e5e7eb;font-family:system-ui,Segoe UI,Roboto,Inter,Arial}
+    header{padding:16px 20px;border-bottom:1px solid #1f2430;background:linear-gradient(180deg,#0b0d12,rgba(11,13,18,.6))}
+    h1{font-size:20px;margin:0}
+    main{display:grid;grid-template-columns:360px 1fr;gap:16px;padding:16px}
+    .panel{background:var(--card);border:1px solid #1f2430;border-radius:16px;padding:14px}
+    .row{display:flex;gap:8px;align-items:center}
+    .row>*{flex:1}
+    textarea,input[type="text"]{width:100%;background:#0f1218;border:1px solid #222836;color:#e5e7eb;border-radius:10px;padding:10px;font-size:14px}
+    button{background:var(--accent);border:none;color:#fff;padding:10px 14px;border-radius:12px;font-weight:600;cursor:pointer}
+    button.secondary{background:#1f2430}
+    button.ghost{background:transparent;border:1px solid #273042}
+    small{color:var(--muted)}
+    #canvasWrap{position:relative;display:inline-block}
+    #overlayText{position:absolute;pointer-events:none;left:0;top:0}
+    .flex{display:flex;gap:8px}
+    .col{display:flex;flex-direction:column;gap:8px}
+    .log{background:#0f1218;border:1px solid #212836;border-radius:12px;padding:10px;height:120px;overflow:auto;font-family:ui-monospace,Menlo,Consolas;white-space:pre-wrap}
+    footer{padding:12px 16px;color:#94a3b8}
+    .install{margin-left:auto}
+  </style>
+</head>
+<body>
+  <header class="row" style="gap:12px">
+    <div>
+      <h1>🖼️ Photoshopcito Offline</h1>
+      <small>Instalable como PWA. Todo ocurre en tu navegador, sin APIs externas.</small>
+    </div>
+    <button id="installBtn" class="install ghost" disabled>➕ Instalar app</button>
+  </header>
+  <main>
+    <section class="panel col" style="height:fit-content">
+      <div class="col">
+        <label>1) Sube una imagen</label>
+        <div class="row">
+          <input type="file" id="file" accept="image/*" />
+          <button id="fitBtn" class="secondary">Ajustar al lienzo</button>
+        </div>
+      </div><div class="col">
+    <label>2) Aplica ediciones básicas</label>
+    <div class="flex">
+      <button data-op="grayscale">Blanco y negro</button>
+      <button data-op="brightness" data-value="1.15">Brillo +15%</button>
+      <button data-op="contrast" data-value="1.2">Contraste +20%</button>
+      <button data-op="blur" data-value="6px">Desenfoque 6px</button>
+      <button data-op="rotate" data-value="90">Girar 90°</button>
+    </div>
+  </div>
+
+  <div class="col">
+    <div class="flex">
+      <button id="undoBtn" class="ghost">↩️ Deshacer</button>
+      <button id="downloadBtn" class="ghost">⬇️ Descargar PNG</button>
+    </div>
+    <div class="log" id="log"></div>
+  </div>
+</section>
+
+<section class="panel">
+  <div id="canvasWrap">
+    <canvas id="cvs" width="1200" height="800"></canvas>
+    <canvas id="overlayText"></canvas>
+  </div>
+</section>
+
+  </main>  <footer>
+    Para instalar como PWA necesitas abrir esta página desde **HTTPS o localhost** (no funciona desde `file://`). Sugerencias rápidas: GitHub Pages, Netlify o un servidor local.
+  </footer>  <script>
+    // ===== Manifest dinámico (con iconos generados) =====
+    (function createDynamicManifest(){
+      const sizes = [192, 512];
+      const icons = sizes.map(sz => {
+        const c = document.createElement('canvas'); c.width=c.height=sz; const x=c.getContext('2d');
+        x.fillStyle = '#0b0d12'; x.fillRect(0,0,sz,sz);
+        x.fillStyle = '#4f46e5'; x.fillRect(sz*0.15, sz*0.15, sz*0.7, sz*0.7);
+        x.fillStyle = '#ffffff'; x.font = Math.floor(sz*0.42)+'px system-ui'; x.textAlign='center'; x.textBaseline='middle'; x.fillText('Ps', sz/2, sz/2);
+        return { src: c.toDataURL('image/png'), sizes: `${sz}x${sz}`, type: 'image/png', purpose: 'any' };
+      });
+      const manifest = {
+        name: 'Photoshopcito Offline',
+        short_name: 'Photoshopcito',
+        start_url: '.',
+        display: 'standalone',
+        background_color: '#0b0d12',
+        theme_color: '#0b0d12',
+        icons
+      };
+      const blob = new Blob([JSON.stringify(manifest)], {type:'application/manifest+json'});
+      const url = URL.createObjectURL(blob);
+      document.getElementById('dynamic-manifest').setAttribute('href', url);
+    })();
+
+    // ===== Service Worker (creado y registrado al vuelo) =====
+    if ('serviceWorker' in navigator) {
+      const swCode = `
+        const CACHE = 'pshopcito-v1';
+        self.addEventListener('install', e => {
+          e.waitUntil(caches.open(CACHE).then(c => c.addAll(['./'])));
+          self.skipWaiting();
+        });
+        self.addEventListener('activate', e => { e.waitUntil(self.clients.claim()); });
+        self.addEventListener('fetch', e => {
+          const req = e.request;
+          e.respondWith(
+            caches.match(req).then(cached => cached || fetch(req).then(res => {
+              const copy = res.clone();
+              caches.open(CACHE).then(c => c.put(req, copy));
+              return res;
+            }).catch(() => cached))
+          );
+        });
+      `;
+      const blob = new Blob([swCode], {type:'text/javascript'});
+      const swUrl = URL.createObjectURL(blob);
+      navigator.serviceWorker.register(swUrl);
+    }
+
+    // ===== Botón Instalar (beforeinstallprompt) =====
+    let deferredPrompt = null;
+    const installBtn = document.getElementById('installBtn');
+    window.addEventListener('beforeinstallprompt', (e) => {
+      e.preventDefault();
+      deferredPrompt = e;
+      installBtn.disabled = false;
+    });
+    installBtn.addEventListener('click', async () => {
+      if (!deferredPrompt) return;
+      deferredPrompt.prompt();
+      const { outcome } = await deferredPrompt.userChoice; // accepted / dismissed
+      deferredPrompt = null;
+      installBtn.disabled = true;
+    });
+
+    // ===== App principal (offline) =====
+    const logEl = document.getElementById('log');
+    const cvs = document.getElementById('cvs');
+    const ctx = cvs.getContext('2d');
+    const overlay = document.getElementById('overlayText');
+    const octx = overlay.getContext('2d');
+
+    const state = { img: null, history: [] };
+    function log(msg){ logEl.textContent += `\n${msg}`; logEl.scrollTop = logEl.scrollHeight; }
+
+    document.getElementById('file').addEventListener('change', e => {
+      const f = e.target.files?.[0];
+      if(!f) return;
+      const url = URL.createObjectURL(f);
+      const img = new Image();
+      img.onload = () => {
+        state.img = img;
+        cvs.width = img.width; cvs.height = img.height;
+        overlay.width = img.width; overlay.height = img.height;
+        ctx.filter = 'none';
+        ctx.setTransform(1,0,0,1,0,0);
+        ctx.drawImage(img, 0, 0);
+        octx.clearRect(0,0,overlay.width,overlay.height);
+        state.history = [cvs.toDataURL()];
+        log(`Imagen cargada ${img.width}x${img.height}`);
+      };
+      img.src = url;
+    });
+
+    document.getElementById('fitBtn').addEventListener('click', ()=>{
+      if(!state.img) return;
+      const maxW = 1200, maxH = 800;
+      const r = Math.min(maxW / state.img.width, maxH / state.img.height, 1);
+      cvs.style.width = Math.round(state.img.width * r) + 'px';
+      cvs.style.height = Math.round(state.img.height * r) + 'px';
+      overlay.style.width = cvs.style.width; overlay.style.height = cvs.style.height;
+    });
+
+    document.getElementById('undoBtn').addEventListener('click', ()=>{
+      if(state.history.length <= 1) return;
+      state.history.pop();
+      const img = new Image();
+      img.onload = () => { ctx.setTransform(1,0,0,1,0,0); ctx.filter='none'; ctx.drawImage(img,0,0); };
+      img.src = state.history[state.history.length-1];
+      log('↩️ Deshacer');
+    });
+
+    document.getElementById('downloadBtn').addEventListener('click', ()=>{
+      const a = document.createElement('a');
+      a.href = cvs.toDataURL('image/png');
+      a.download = 'edicion.png';
+      a.click();
+    });
+
+    document.querySelectorAll('button[data-op]').forEach(btn=>{
+      btn.addEventListener('click', ()=>{
+        const op = btn.dataset.op; const val = btn.dataset.value;
+        applyStep({op, value: val});
+      })
+    })
+
+    async function applyStep(step){
+      if(!state.img && state.history.length===0) return;
+      const op = step.op?.toLowerCase();
+      switch(op){
+        case 'rotate':{
+          const deg = Number(step.value||0);
+          const rad = deg*Math.PI/180;
+          const w = cvs.width, h = cvs.height;
+          const tmp = document.createElement('canvas'); tmp.width=w; tmp.height=h;
+          tmp.getContext('2d').drawImage(cvs,0,0);
+          const cos = Math.abs(Math.cos(rad)), sin = Math.abs(Math.sin(rad));
+          const nw = Math.floor(w*cos + h*sin); const nh = Math.floor(w*sin + h*cos);
+          cvs.width = nw; cvs.height = nh; overlay.width=nw; overlay.height=nh;
+          ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,nw,nh);
+          ctx.translate(nw/2, nh/2); ctx.rotate(rad); ctx.drawImage(tmp, -w/2, -h/2);
+          ctx.setTransform(1,0,0,1,0,0);
+          break;
+        }
+        case 'grayscale':{
+          const w=cvs.width,h=cvs.height; const imgd=ctx.getImageData(0,0,w,h); const d=imgd.data;
+          for(let i=0;i<d.length;i+=4){ const g=0.2126*d[i]+0.7152*d[i+1]+0.0722*d[i+2]; d[i]=d[i+1]=d[i+2]=g }
+          ctx.putImageData(imgd,0,0); break;
+        }
+        case 'brightness':{
+          const amount=parseFloat(step.value||1);
+          ctx.filter = `brightness(${amount})`; redraw(); ctx.filter='none'; break;
+        }
+        case 'contrast':{
+          const amount=parseFloat(step.value||1);
+          ctx.filter = `contrast(${amount})`; redraw(); ctx.filter='none'; break;
+        }
+        case 'blur':{
+          const px = String(step.value||'4px');
+          ctx.filter = `blur(${px})`; redraw(); ctx.filter='none'; break;
+        }
+        default:
+          log('Paso no reconocido: '+JSON.stringify(step));
+      }
+      state.history.push(cvs.toDataURL());
+    }
+
+    function redraw(){
+      const w=cvs.width,h=cvs.height; const tmp=document.createElement('canvas'); tmp.width=w; tmp.height=h;
+      tmp.getContext('2d').drawImage(cvs,0,0); ctx.clearRect(0,0,w,h); ctx.drawImage(tmp,0,0);
+    }
+  </script></body>
+</html>
